@@ -1,26 +1,142 @@
 ---
 title: "20230407_HALE_in_AML_proteomics"
-format: html
-editor: visual
+author: "Sebastian Wolf"
+toc: true
+format:
+  html:
+    theme: litera
+    self-contained: true
+    code-fold: true
+knitr:
+  opts_chunk:
+    message: false
+    warning: false
 ---
 
-## Quarto
-
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
-
 ```{r}
-1 + 1
+library(tidyverse)
+library(MultiAssayExperiment)
+
+prot_data <- readRDS("~/Forschung/AG Oellerich/Datensätze/FFM_Discovery_Cohort/FFM_Proteomics/prot_ffm.multiassayexperiment.RDS")
+
+prot_data <- assay(prot_data, "proteomics_unimputed")
+
+hlae <- "P13747"
+
+phen_data <- read_csv("~/Forschung/AG Oellerich/Datensätze/FFM_Discovery_Cohort/FFM_AML_Discovery_Cohort.csv")
+
+theme_set(cowplot::theme_minimal_grid() + cowplot::panel_border())
+theme_update(legend.position = "bottom")
 ```
 
-You can add options to executable code like this
+General distribution of HLA-E expression in the data set
 
 ```{r}
-#| echo: false
-2 * 2
+prot_data %>% 
+  t() %>% 
+  as_tibble(rownames  = "ID") %>% 
+  dplyr::select(ID, "P13747") %>% 
+  right_join(phen_data, by=c("ID")) %>% 
+  dplyr::rename("HLA_E" = `P13747`) -> phen_data
+  
+phen_data %>%   
+  ggplot(aes(x=HLA_E)) +
+  geom_density(fill = "grey") 
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+Right-skewed expression with a bimodal peak.
+
+PCA plot colored by HLA-E expression
+
+```{r}
+prot_data %>% 
+  t() %>% 
+  pcaMethods::pca() %>% 
+  pcaMethods::scores() %>% 
+  as_tibble(rownames = "ID") %>% 
+  left_join(phen_data, by="ID") %>% 
+  ggplot(aes(x=PC1, y = PC2, col = HLA_E)) +
+  geom_point()
+```
+
+Correlation plot HLA_E expression and first 10 PCs
+
+```{r}
+prot_data %>% 
+  t() %>% 
+  pcaMethods::pca(nPcs = 10) %>% 
+  pcaMethods::scores() %>% 
+  as_tibble(rownames = "ID") %>% 
+  left_join(phen_data, by="ID") %>% 
+  dplyr::select(contains("PC"), HLA_E) %>% 
+  cor() %>% 
+  corrplot::corrplot()
+```
+
+```{r}
+prot_data %>% 
+  t() %>% 
+  pcaMethods::pca(nPcs = 10) %>% 
+  pcaMethods::scores() %>% 
+  as_tibble(rownames = "ID") %>% 
+  left_join(phen_data, by="ID") %>% 
+  dplyr::select(PC1, PC5, HLA_E) %>% 
+  pivot_longer(cols = c(PC1, PC5), names_to = "PC", values_to = "PC_score") %>% 
+  ggplot(aes(x=PC_score, y = HLA_E, col = HLA_E)) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  facet_wrap(. ~ PC, scale = "free") +
+  ggpubr::stat_cor()
+```
+
+Moderately weak correlations between PCs 1 and 5 and HLA-E expression.
+
+HLA-E expression and clinical features
+
+```{r}
+phen_data %>% 
+  mutate(HLA_E_dic = factor(HLA_E >= median(HLA_E, na.rm = T)),
+         HLA_E_quant = factor(cut(HLA_E, 4))) -> phen_data
+
+vars <- c("Sex", "Age_group", "Precursor", "FAB", "WHO", "Complex_Karyotype", "NPM1", "FLT3", "ELN2017")
+
+tableone::CreateTableOne(data = phen_data, strata = "HLA_E_dic", vars = vars) %>% 
+  tableone::kableone(format = "html", caption = "Clinical parameters stratified by HLA-E expression")
+  
+```
+
+```{r}
+tableone::CreateTableOne(data = phen_data, strata = "HLA_E_quant", vars = vars) %>% 
+  tableone::kableone(format = "html", caption = "Clinical parameters stratified by HLA-E expression")
+```
+
+HLA-E expression doesn't stratify along any clinically relevant axes.
+
+```{r}
+library(survival)
+library(survminer)
+
+ggsurvplot(survfit(Surv(OSM, OS_Status) ~ HLA_E_dic, phen_data), pval = T, risk.table = T, palette = "nejm")
+```
+
+```{r}
+ggsurvplot(survfit(Surv(OSM, OS_Status) ~ HLA_E_quant, phen_data), pval = T, risk.table = T, palette = "nejm")
+```
+
+```{r}
+ggsurvplot(survfit(Surv(EFSM, EFS_Status) ~ HLA_E_dic, phen_data), pval = T, risk.table = T, palette = "nejm")
+```
+
+HLA-E expression does not stratify long term outcome in our AML cohort.
+
+# Summary
+
+From the data set it seems that HLA-E expression in the data set is homogeneous and has no correlation with the clinical parameters tested. Furthermore it does not seem to predict clinical long term outcomes.
+
+# Session info
+
+last rendered `r Sys.Date()`
+
+```{r}
+sessionInfo()
+```
