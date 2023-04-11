@@ -1,0 +1,325 @@
+---
+title: "20230411_NK_targets_in_AML"
+author: "Sebastian Wolf"
+toc: true
+format:
+  html:
+    theme: litera
+    self-contained: true
+    code-fold: true
+knitr:
+  opts_chunk:
+    message: false
+    warning: false
+bibliography: references.bib
+---
+
+# Introduction
+
+We use the proteomic data set described in [@jayavelu2022] covering bone marrow MNCs from 177 AML patients (169 after QC). In addition, the data set includes sorted CD34+ bone marrow HSCs from 13 healthy donors. Details on the data set preprocessing and QC can be found [here](https://github.com/swolfsci/AML_proteogenomics/blob/main/LFQ%20Proteomics%20Workflow/20221413_lfq_proteome_preprocess_merge_impute.md)
+
+The vignette aims to profile the expression of a set of possible antigens for CAR-NK cells. Thus, for every antigen we will try to  1. characterize the relationship between the antigen expression, patient data and molecular disease subtypes and 2. compare the expression between all AML samples and healthy HSCs. The analysis has two major limitations. 1. Protein expression doesn't necessarily imply surface expression and there is not way to infer this information from our bulk data. 2. Comparing healthy HSCs to AML bulk population doesn't give information of antigen expression on other blood cell populations and hence the target specificity. Lastly, MS-based proteomics has an inherently lower sensitivity compared to genetic methods to detect the expression of a particular antigen of interest.
+
+# Analysis
+
+```{r}
+library(tidyverse)
+library(MultiAssayExperiment)
+
+prot_data <- readRDS("~/Forschung/AG Oellerich/Datensätze/FFM_Discovery_Cohort/FFM_Proteomics/prot_ffm.multiassayexperiment.RDS")
+
+phen_data <- read_csv("~/Forschung/AG Oellerich/Datensätze/FFM_Discovery_Cohort/FFM_AML_Discovery_Cohort.csv")
+
+merge_data <- readRDS("~/Forschung/AG Oellerich/Datensätze/Proteomics Merge/prot_merge.multiassayexperiment.RDS")
+
+theme_set(cowplot::theme_minimal_grid() + cowplot::panel_border())
+theme_update(legend.position = "bottom")
+```
+
+For every protein, we will 1. plot the expression of the entire AML cohort followed by 2. association between protein expression and patient and molecular subgroups (sex, age group, precursor disease (i.e. de novo vs secondary AML), WHO 2016 AML with myelodysplasia related cytogenetics (AML-MRC), FAB, NPM1 (mutant vs wildtype), FLT3 (ITD vs wildtype), ELN2017 cytogenetic riks (intermediate, favorable and adverse). Where possible, we will use the unimputed proteome for the analyses.
+
+```{r}
+vars <- c("Sex", "Age_group", "Precursor_fac", "AML-MRC", "NPM1", "FLT3", "ELN2017", "FAB")
+```
+
+## CD33
+
+```{r}
+assay(prot_data, "proteomics_unimputed")["P20138", ] %>% 
+  as_tibble(rownames = "ID") %>% 
+  left_join(phen_data) %>% 
+  dplyr::rename("CD33" = "value") -> phen_data
+
+phen_data %>% 
+  ggplot(aes(x = CD33)) +
+  geom_density(fill = "grey")
+```
+
+It seems that there exists a proportion of samples with low or absence CD33 expression. Samples expressing CD33 show a bimodal distribution.
+
+```{r}
+phen_data %>% 
+  dplyr::select(CD33, vars) %>% 
+  mutate(across(.cols = -CD33, ~ as.factor(.))) %>% 
+  pivot_longer(cols = -CD33, names_to = "variable", values_to = "value") %>% 
+  group_by(variable) %>% 
+  rstatix::wilcox_effsize(CD33 ~ value) %>% 
+  mutate(magnitude = factor(magnitude, levels=c("large", "moderate", "small"))) -> CD33_effsize
+
+
+phen_data %>% 
+  dplyr::select(CD33, vars) %>% 
+  mutate(across(.cols = -CD33, ~ as.factor(.))) %>% 
+  pivot_longer(cols = -CD33, names_to = "variable", values_to = "value") %>% 
+  group_by(variable) %>% 
+  rstatix::wilcox_test(CD33 ~ value) %>% 
+  left_join(dplyr::select(CD33_effsize, group1, group2, magnitude), by=c("group1", "group2")) %>% 
+  arrange(p.adj, magnitude) %>% 
+  dplyr::select(variable, group1, group2, p.adj, p.adj.signif, magnitude) %>% 
+  DT::datatable(filter = "top", 
+                options = list(autoWidth = F, scrollX = T), 
+                class = "compact hover row-border stripe dt-left cell-border nowrap")
+```
+
+CD33 expression is significantly (wilcoxon non parametric rank sum test, p value adjusted for multiple testing) associated with NPM1 mutation status (higher in NPM1 mutant disease) and ELN2017 cytogenetic risk. The latter is very likely confounded by NPM1 mutation status (all NPM1 mutated AML are either favorable or intermediate risk disease). We can test this using a multivariate linear regression including NPM1 and ELN2017 as independent variables.
+
+```{r}
+phen_data %>% 
+  dplyr::select(CD33, vars) %>% 
+  {
+    lm(CD33 ~ NPM1 + ELN2017, .)
+  } %>% summary()
+```
+
+As expected, NPM1 but not ELN2017 are significant covariates in the linear model.
+
+```{r}
+phen_data %>% 
+  dplyr::select(CD33, NPM1) %>% 
+  ggplot(aes(x=NPM1, y = CD33, fill = NPM1)) +
+  geom_violin() +
+  geom_point(position = position_jitter(width = 0.1)) +
+  ggpubr::stat_compare_means() +
+  scale_fill_manual(values=c("#3a86ff", "#fb5607"))
+```
+
+Additionally, there seems to be an expression gradient along FAB with more mature disease (e.g. M4, M5) having higher CD33. This is however not statistically significant given the low sample size.
+
+```{r}
+phen_data %>% 
+  ggplot(aes(x=FAB, y = CD33, fill = FAB)) +
+  geom_violin() +
+  geom_point() +
+  ggpubr::stat_compare_means()
+```
+
+Lastly, we can compare CD33 expression of AML to HCSs.
+
+```{r}
+assay(merge_data, "proteomics_unimputed")["P20138", ] %>% 
+  t() %>% 
+  as_tibble(rownames = "ID") %>% 
+  dplyr::rename("CD33" = "P20138") %>% 
+  dplyr::filter(!stringr::str_detect(ID, "AMLR")) %>% 
+  mutate(ID = factor(stringr::str_detect(ID, "CD34"), levels=c(T,F), labels=c("HSC", "AML"))) %>% 
+  ggplot(aes(x=ID, y = CD33, fill = ID)) +
+  geom_violin() +
+  geom_point(position = position_jitter(width = 0.1)) +
+  ggpubr::stat_compare_means()
+```
+
+CD33 is significantly higher expressed on AML blasts compared to healthy HSCs.
+
+## CD123
+
+CD123 is not profiled in the data set
+
+## CLEC12A
+
+CLEC12A is not profiled in the data set
+
+## SIGLEC6
+
+SIGLEC6 is not profiled in the data set
+
+## ADGRE2 
+
+ADGRE2 is not profiled in the data set
+
+## CD70
+
+CD70 is not profiled in the data set
+
+## FLT3
+
+FLT3 expression data is missing in `r assay(prot_data, "proteomics_unimputed")["P36888", ] %>% is.na() %>% sum()` of the samples, hence we use the imputed data set.
+
+```{r}
+assay(prot_data, "proteomics_imputed")["P36888", ] %>% 
+  as_tibble(rownames = "ID") %>% 
+  dplyr::rename("FLT3_protein" = "value") %>% 
+  left_join(phen_data) -> phen_data
+
+assay(prot_data, "proteomics_unimputed")["P36888", ] %>% 
+  as_tibble(rownames = "ID") %>% 
+  dplyr::rename("FLT3_protein_unimputed" = "value") %>% 
+  left_join(phen_data) -> phen_data
+
+phen_data %>% 
+  dplyr::select(FLT3_protein_unimputed, FLT3_protein) %>% 
+  pivot_longer(cols = everything(), names_to = "imp", values_to = "val") %>% 
+  ggplot(aes(x=val, fill = imp)) +
+  geom_density(alpha = 0.6)
+```
+
+There appears to be a multimodal distribution with the unimputed data set a little more shifted towards lower intensities. This is to be expected as missing values are below the detection threshold and thus algorithms mainly impute lower values.
+
+```{r}
+phen_data %>% 
+  dplyr::select(FLT3_protein, vars) %>% 
+  mutate(across(.cols = -FLT3_protein, ~ as.factor(.))) %>% 
+  pivot_longer(cols = -FLT3_protein, names_to = "variable", values_to = "value") %>% 
+  group_by(variable) %>% 
+  rstatix::wilcox_effsize(FLT3_protein ~ value) %>% 
+  mutate(magnitude = factor(magnitude, levels=c("large", "moderate", "small"))) -> FLT3_protein_effsize
+
+
+phen_data %>% 
+  dplyr::select(FLT3_protein, vars) %>% 
+  mutate(across(.cols = -FLT3_protein, ~ as.factor(.))) %>% 
+  pivot_longer(cols = -FLT3_protein, names_to = "variable", values_to = "value") %>% 
+  group_by(variable) %>% 
+  rstatix::wilcox_test(FLT3_protein ~ value) %>% 
+  left_join(dplyr::select(FLT3_protein_effsize, group1, group2, magnitude), by=c("group1", "group2")) %>% 
+  arrange(p.adj, magnitude) %>% 
+  dplyr::select(variable, group1, group2, p.adj, p.adj.signif, magnitude) %>% 
+  DT::datatable(filter = "top", 
+                options = list(autoWidth = F, scrollX = T), 
+                class = "compact hover row-border stripe dt-left cell-border nowrap")
+```
+
+Again, there is some expression gradient along FAB groups and between *de novo* and secondary AML. There is not difference between FLT3 wildtype and ITD samples.
+
+```{r}
+phen_data %>% 
+  ggplot(aes(x=FAB, y = FLT3_protein, fill = FAB)) +
+  geom_violin() +
+  geom_point() +
+  ggpubr::stat_compare_means()
+```
+
+Lastly, we compare FLT3 AML vs HSC expression.
+
+```{r}
+assay(merge_data, "proteomics_unimputed")["P36888", ] %>% 
+  t() %>% 
+  as_tibble(rownames = "ID") %>% 
+  dplyr::rename("FLT3_protein" = "P36888") %>% 
+  dplyr::filter(!stringr::str_detect(ID, "AMLR")) %>% 
+  mutate(ID = factor(stringr::str_detect(ID, "CD34"), levels=c(T,F), labels=c("HSC", "AML"))) %>% 
+  ggplot(aes(x=ID, y = FLT3_protein, fill = ID)) +
+  geom_violin() +
+  geom_point(position = position_jitter(width = 0.1)) +
+  ggpubr::stat_compare_means()
+```
+
+FLT3 protein expression is not significantly different between AML blasts and HSCs.
+
+## CD84/SLAMF5
+
+```{r}
+assay(prot_data, "proteomics_unimputed")["Q9UIB8", ] %>% 
+  as_tibble(rownames = "ID") %>% 
+  dplyr::rename("CD84" = "value") %>% 
+  left_join(phen_data) -> phen_data
+
+phen_data %>% 
+  ggplot(aes(x=CD84)) +
+  geom_density(fill = "grey")
+```
+
+Here again we find a bimodal distribution.
+
+```{r}
+phen_data %>% 
+  dplyr::select(CD84, vars) %>% 
+  mutate(across(.cols = -CD84, ~ as.factor(.))) %>% 
+  pivot_longer(cols = -CD84, names_to = "variable", values_to = "value") %>% 
+  filter(value != "M6") %>%  # the only FAB M6 has missing value for CD84
+  group_by(variable) %>% 
+  rstatix::wilcox_effsize(CD84 ~ value) %>% 
+  mutate(magnitude = factor(magnitude, levels=c("large", "moderate", "small"))) -> CD84_effsize
+
+
+phen_data %>% 
+  dplyr::select(CD84, vars) %>% 
+  mutate(across(.cols = -CD84, ~ as.factor(.))) %>% 
+  pivot_longer(cols = -CD84, names_to = "variable", values_to = "value") %>% 
+  filter(value != "M6") %>% 
+  group_by(variable) %>% 
+  rstatix::wilcox_test(CD84 ~ value) %>% 
+  left_join(dplyr::select(CD84_effsize, group1, group2, magnitude), by=c("group1", "group2")) %>% 
+  arrange(p.adj, magnitude) %>% 
+  dplyr::select(variable, group1, group2, p.adj, p.adj.signif, magnitude) %>% 
+  DT::datatable(filter = "top", 
+                options = list(autoWidth = F, scrollX = T), 
+                class = "compact hover row-border stripe dt-left cell-border nowrap")
+```
+
+CD84 expression seems to be correlated with NPM1 mutation status, precursor status and to a lesser extent ELN2017 (again likely confounded by NPM1).
+
+```{r}
+phen_data %>% 
+  ggplot(aes(x = Precursor_fac, y = CD84, fill = Precursor_fac)) +
+  geom_violin() +
+  geom_point(position = position_jitter(width = 0.1)) +
+  ggpubr::stat_compare_means()
+```
+
+We can again perform a multiple regression analysis (which in this case is the equivalent to an ANCOVA)
+
+```{r}
+phen_data %>% 
+  {
+    lm(CD84 ~ NPM1 + ELN2017 + Precursor_fac, .)
+  } %>% summary()
+```
+
+And confirm that NPM1 and ELN2017 are codependent while the precursor state is independent.
+
+```{r}
+phen_data %>% 
+  ggplot(aes(x = NPM1, y = CD84, fill = NPM1)) +
+  geom_violin() +
+  geom_point(position = position_jitter(width = 0.1)) +
+  ggpubr::stat_compare_means()
+```
+
+CD84 appears to be lower expressed in NPM1 mutated disease.
+
+```{r}
+assay(merge_data, "proteomics_unimputed")["Q9UIB8", ] %>% 
+  t() %>% 
+  as_tibble(rownames = "ID") %>% 
+  dplyr::rename("CD84" = "Q9UIB8") %>% 
+  dplyr::filter(!stringr::str_detect(ID, "AMLR")) %>% 
+  mutate(ID = factor(stringr::str_detect(ID, "CD34"), levels=c(T,F), labels=c("HSC", "AML"))) %>% 
+  ggplot(aes(x=ID, y = CD84, fill = ID)) +
+  geom_violin() +
+  geom_point(position = position_jitter(width = 0.1)) +
+  ggpubr::stat_compare_means()
+```
+
+If any, CD84 seems to have a lower expression in AML compared to healthy HSCs. However, the power here is quite small.
+
+# Summary
+
+CD33, FLT3 and CD84 are profiled in the data set. As previously published, CD33 is higher expressed in NPM1 mutated AML. For FLT3, expression doesn't appear to be significantly correlated with any molecular subgroups. For CD84, expression is higher in secondary compared to *de novo* AML while also being lower in NPM1 mutated disease. However, while CD33 is higher expressed in AML compared to healthy BM HSCs this seems to not be the case for CD84.
+
+# Session Info
+
+last rendered `r Sys.Date()`
+
+```{r}
+sessionInfo()
+```
